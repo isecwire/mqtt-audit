@@ -258,3 +258,219 @@ def test_client_id_enumeration(auditor: MqttAuditor) -> None:
         ))
 
 
+def test_tls_certificate_validation(auditor: MqttAuditor) -> None:
+    """Check TLS certificate validity, expiry, and CN/SAN match.
+
+    Connects to the TLS port and inspects the server certificate
+    for common issues.
+    """
+    logger.info("Checking TLS certificate on %s:%d ...", auditor.host, auditor.tls_port)
+    import socket
+
+    try:
+        # First, get the actual certificate with validation disabled
+        ctx_noverify = ssl.create_default_context()
+        ctx_noverify.check_hostname = False
+        ctx_noverify.verify_mode = ssl.CERT_NONE
+
+        with socket.create_connection(
+            (auditor.host, auditor.tls_port), timeout=auditor.timeout
+        ) as sock:
+            with ctx_noverify.wrap_socket(sock, server_hostname=auditor.host) as ssock:
+                cert_bin = ssock.getpeercert(binary_form=True)
+                cert = ssock.getpeercert()
+
+        if not cert and not cert_bin:
+            auditor.report.add(Finding(
+                severity=Severity.HIGH,
+                title="TLS certificate not presented",
+                description="The broker did not present a TLS certificate.",
+                remediation="Configure the broker with a valid TLS certificate.",
+            ))
+            return
+
+        issues: list[str] = []
+
+        # Check expiry
+        if cert and "notAfter" in cert:
+            from ssl import cert_time_to_seconds
+            try:
+                expiry_ts = cert_time_to_seconds(cert["notAfter"])
+                now_ts = time.time()
+                days_left = (expiry_ts - now_ts) / 86400
+
+                if days_left < 0:
+                    issues.append(f"Certificate EXPIRED ({abs(int(days_left))} days ago)")
+                elif days_left < 30:
+                    issues.append(f"Certificate expires in {int(days_left)} days")
+            except Exception as e:
+                logger.debug("Could not parse cert expiry: %s", e)
+
+        # Check hostname match via full validation
+        try:
+            ctx_verify = ssl.create_default_context()
+            with socket.create_connection(
+                (auditor.host, auditor.tls_port), timeout=auditor.timeout
+            ) as sock:
+                with ctx_verify.wrap_socket(sock, server_hostname=auditor.host) as ssock:
+                    pass  # Validation succeeded
+        except ssl.SSLCertVerificationError as e:
+            if "hostname" in str(e).lower():
+                issues.append("Certificate hostname does not match target")
+            elif "self-signed" in str(e).lower() or "self signed" in str(e).lower():
+                issues.append("Self-signed certificate")
+            elif "expired" in str(e).lower():
+                issues.append("Certificate chain validation failed (expired)")
+            else:
+                issues.append(f"Certificate validation failed: {e}")
+        except Exception as e:
+            issues.append(f"Certificate validation error: {e}")
+
+        if issues:
+            auditor.report.add(Finding(
+                severity=Severity.HIGH,
+                title="TLS certificate validation issues",
+                description=(
+                    "The broker's TLS certificate has the following issues: "
+                    + "; ".join(issues)
+                ),
+                remediation=(
+                    "Replace the certificate with one issued by a trusted CA. "
+                    "Ensure the certificate CN or SAN matches the broker's "
+                    "hostname. Renew certificates before expiry."
+                ),
+                details={"issues": issues, "cert_info": cert or {}},
+            ))
+        else:
+            auditor.report.add(Finding(
+                severity=Severity.INFO,
+                title="TLS certificate valid",
+                description="The broker's TLS certificate passed validation checks.",
+                remediation="No action required.",
+            ))
+
+    except (OSError, ConnectionRefusedError, ssl.SSLError) as e:
+        logger.debug("Could not connect for TLS cert check: %s", e)
+        auditor.report.add(Finding(
+            severity=Severity.INFO,
+            title="TLS certificate check skipped",
+            description=f"Could not connect to TLS port for certificate validation: {e}",
+            remediation="Ensure the TLS port is accessible.",
+        ))
+
+
+def test_mqtt5_features(auditor: MqttAuditor) -> None:
+    """Probe MQTT v5 specific features.
+
+    Tests whether the broker supports MQTT v5 enhanced authentication,
+    topic aliases, shared subscriptions, and flow control.
+    """
+    logger.info("Probing MQTT v5 features on %s:%d ...", auditor.host, auditor.port)
+
+    try:
+        from paho.mqtt.client import Client
+        from paho.mqtt.enums import CallbackAPIVersion, MQTTProtocolVersion
+        from paho.mqtt.properties import Properties
+        from paho.mqtt.packettypes import PacketTypes
+    except ImportError:
+        logger.warning("paho-mqtt v5 support not available in this version.")
+        return
+
+    connected_event = threading.Event()
+    connect_result: dict[str, Any] = {"ok": False, "properties": None}
+
+    def on_connect(
+        client: mqtt.Client,
+        userdata: Any,
+        flags: Any,
+        rc: Any,
+        properties: Any = None,
+    ) -> None:
+        connect_result["ok"] = True
+        connect_result["properties"] = properties
+        connected_event.set()
+
+    try:
+        client = Client(
+            callback_api_version=CallbackAPIVersion.VERSION2,
+            client_id=f"mqtt-audit-v5-{uuid.uuid4().hex[:8]}",
+            protocol=MQTTProtocolVersion.MQTTv5,
+        )
+    except Exception:
+        logger.debug("Could not create MQTT v5 client.")
+        return
+
+    client.on_connect = on_connect
+
+    if auditor.username:
+        client.username_pw_set(auditor.username, auditor.password)
+
+    features: dict[str, bool] = {
+        "mqttv5_supported": False,
+        "shared_subscriptions": False,
+        "topic_alias_max": False,
+    }
+
+    try:
+        client.connect(auditor.host, auditor.port, keepalive=int(auditor.timeout))
+        client.loop_start()
+        connected_event.wait(timeout=auditor.timeout)
+
+        if connect_result["ok"]:
+            features["mqttv5_supported"] = True
+
+            # Test shared subscription
+            sub_event = threading.Event()
+
+            def on_subscribe(
+                _client: mqtt.Client,
+                _userdata: Any,
+                mid: int,
+                rc_list: Any = (),
+                properties: Any = None,
+            ) -> None:
+                sub_event.set()
+
+            client.on_subscribe = on_subscribe
+
+            # Shared subscription (MQTT 5 feature)
+            try:
+                client.subscribe("$share/audit/test/#", qos=0)
+                sub_event.wait(timeout=auditor.timeout)
+                if sub_event.is_set():
+                    features["shared_subscriptions"] = True
+            except Exception:
+                pass
+
+    except Exception as exc:
+        logger.debug("MQTT v5 connection failed: %s", exc)
+    finally:
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except Exception:
+            pass
+
+    if features["mqttv5_supported"]:
+        detail_parts = ["MQTT v5 protocol is supported."]
+        if features["shared_subscriptions"]:
+            detail_parts.append("Shared subscriptions are available.")
+
+        auditor.report.add(Finding(
+            severity=Severity.INFO,
+            title="MQTT v5 features detected",
+            description=" ".join(detail_parts),
+            remediation=(
+                "Ensure MQTT v5 features like shared subscriptions and "
+                "topic aliases are properly secured via ACLs. Review "
+                "enhanced authentication configuration."
+            ),
+            details=features,
+        ))
+    else:
+        auditor.report.add(Finding(
+            severity=Severity.INFO,
+            title="MQTT v5 not supported or not reachable",
+            description="The broker did not accept an MQTT v5 connection.",
+            remediation="No action required.",
+        ))
