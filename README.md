@@ -105,3 +105,91 @@ Run as a Python module:
 python -m mqtt_audit --host localhost
 ```
 
+## CLI options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--host` | Target broker hostname or IP (required) | -- |
+| `--port` | MQTT plaintext port | 1883 |
+| `--tls-port` | MQTT TLS port to probe | 8883 |
+| `--username` | Username for authenticated checks | None |
+| `--password` | Password for authenticated checks | None |
+| `--output FILE` | Write report to file | None |
+| `--timeout` | Per-check timeout in seconds | 5.0 |
+| `--profile` | Scan profile: quick, standard, thorough | standard |
+| `--format` | Output format: table, json, csv, markdown | table |
+| `--mqtt-version` | MQTT protocol version: 3.1.1, 5 | 3.1.1 |
+| `--websocket` | Use WebSocket transport | off |
+| `--wordlist FILE` | Custom credential wordlist | built-in |
+| `-v, --verbose` | Enable debug logging | off |
+
+## Example output
+
+```
+mqtt-audit 1.0.0 -- MQTT broker security auditor
+
+Target: localhost:1883  (TLS probe: 8883)  Profile: standard  Transport: TCP
+
+                            mqtt-audit report
+  Target: localhost:1883  |  TLS port: 8883  |  Time: 2026-04-03T...
+
+              Executive Summary (Risk: 9.9/10.0)
+  The MQTT broker at localhost was audited and 8 security finding(s)
+  were identified. Overall risk rating: CRITICAL (9.9/10.0). 2 CRITICAL
+  finding(s) require immediate remediation. ...
+
+ #   Severity   CVSS   Title                                Remediation
+ 1   CRITICAL    9.8   Anonymous access allowed              Disable anonymous access...
+ 2   CRITICAL    9.8   Broker accepts invalid credentials    Review the authentication...
+ 3   HIGH        7.5   TLS not available on port 8883        Configure a TLS listener...
+ 4   HIGH        7.5   Wildcard subscribe allowed for ...    Restrict wildcard subs...
+ 5   MEDIUM      5.3   $SYS topic tree exposed               Restrict access to $SYS/#...
+ 6   MEDIUM      5.0   QoS 2 available -- resource exh...    Restrict QoS 2 to trusted...
+ 7   MEDIUM      6.5   Write access granted to 'anonymous'   Configure publish ACLs...
+ 8   LOW         4.3   Will message injection possible       Apply ACL rules to will...
+
+                        Compliance References
+ Framework          Reference   Description                  Related Findings
+ OWASP IoT Top 10   I1          Weak, Guessable Passwords    Anonymous access allowed...
+ IEC 62443-4-2      CR 1.1      Human user identification    Anonymous access allowed...
+ ...
+
+Total findings: 8  (critical: 2, high: 2, medium: 3, low: 1)
+```
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | No HIGH or CRITICAL findings |
+| 1 | At least one HIGH or CRITICAL finding |
+
+This makes mqtt-audit suitable for CI/CD pipelines and automated compliance checks.
+
+## Disclaimer
+
+This tool is intended for **authorised security testing only**. Always obtain written permission before scanning infrastructure you do not own. The authors accept no liability for misuse. See [LICENSE](LICENSE) for details.
+
+## FAQ
+
+### What is OWASP IoT Top 10?
+
+**OWASP** (Open Web Application Security Project) is a non-profit that publishes lists of the most common security mistakes. The **OWASP IoT Top 10** lists the 10 most frequent security issues in IoT devices: weak passwords, insecure network services, lack of encryption, insecure interfaces, etc.
+
+When mqtt-audit finds a problem, the report maps it to the relevant OWASP IoT category. This is a universal language that auditors, clients, and insurers all understand.
+
+### Why audit an MQTT broker?
+
+MQTT brokers are the communication backbone of IoT systems. A misconfigured broker can allow anyone to subscribe to all messages (data leak), publish commands to devices (unauthorized control), or extract credentials transmitted in plaintext. mqtt-audit systematically tests for all these issues.
+
+### How is this used in practice?
+
+```bash
+mqtt-audit --host broker.client.com --profile thorough --format json --output report.json
+```
+
+This connects to the client's MQTT broker, runs 17 security checks (anonymous access, TLS, ACLs, default credentials, payload inspection), and generates a report with findings mapped to OWASP IoT Top 10 and IEC 62443.
+
+## License
+
+MIT -- Copyright (c) 2026 isecwire GmbH
