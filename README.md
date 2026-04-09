@@ -1,5 +1,9 @@
 # mqtt-audit
 
+[![CI](https://github.com/isecwire/mqtt-audit/actions/workflows/ci.yml/badge.svg)](https://github.com/isecwire/mqtt-audit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
+
 <p align="center">
   <img src="assets/screenshot.svg" alt="mqtt-audit terminal output" width="900">
 </p>
